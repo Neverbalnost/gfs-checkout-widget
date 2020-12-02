@@ -2063,11 +2063,11 @@ export class GfsCheckout extends PolymerElement {
         switch (this.defaultDeliveryMethod) {
             case 0:
                 this.shadowRoot.querySelector('#calendarServices').querySelectorAll('gfs-listbox')[0].selected = null;
-                this.shadowRoot.querySelector('#droppointServices').querySelectorAll('gfs-listbox')[0].selected = null;
+                // this.shadowRoot.querySelector('#droppointServices').querySelectorAll('gfs-listbox')[0].selected = null;
                 break;
             case 1:
                 this.shadowRoot.querySelector('#standarServices').querySelectorAll('gfs-listbox')[0].selected = null;
-                this.shadowRoot.querySelector('#droppointServices').querySelectorAll('gfs-listbox')[0].selected = null;
+                // this.shadowRoot.querySelector('#droppointServices').querySelectorAll('gfs-listbox')[0].selected = null;
                 break;
             case 2:
                 this.shadowRoot.querySelector('#standarServices').querySelectorAll('gfs-listbox')[0].selected = null;
@@ -2076,6 +2076,7 @@ export class GfsCheckout extends PolymerElement {
         }
 
         if (method != null) {
+            TPS.Stores.DeliveryMethodDetails.set({ isServiceSelected: true });
             this.selectedServiceDetails.serviceId = e.currentTarget.id;
             this.selectedServiceDetails.service = method.description;
             this.selectedServiceDetails.shipping = method.costs;
@@ -2148,7 +2149,126 @@ export class GfsCheckout extends PolymerElement {
             if (!!checkoutData) {
                 checkoutData.value = btoa(JSON.stringify(this.closeCheckoutData));
             }
+
+            if (method.type === 'home') {
+                this._saveDeliveryMethodData(method, () => {
+                    this._fire('successful-delivery-method-set', method);
+                })
+            } else if (method.serviceType.type === 'dmStandardDropPoint') {
+                this._saveDeliveryMethodData(method, () => {
+                    this._fire('successful-collection-point-method-set', method);
+                })
+            }
         }
+    }
+
+    _saveDeliveryMethodData(method, callback) {
+        if (!method) {
+            console.error('GFS configuration is invalid');
+            return;
+        };
+
+        const selectedDroppointId = this._selectedDropPoint ? this._selectedDropPoint.droppointId : null;
+        const checkoutSelectedDroppointAddress = this._selectedDropPoint ? this._selectedDropPoint.geoLocation.addressLines.toString() : null;
+        const checkoutResult = btoa(JSON.stringify($.extend(this.closeCheckout, { selectedDroppointId: selectedDroppointId })));
+        const checkoutData = btoa(JSON.stringify($.extend(this.closeCheckoutData, { checkoutSelectedDroppointAddress: checkoutSelectedDroppointAddress })));
+
+        const body = {
+            deliveryOptionId: method.select,
+            id: method.id,
+            title: method.description,
+            price: method.costs.price,
+            serviceType: method.type,
+            sessionID: $('[name=sessionID]').val(),
+            checkoutResult: checkoutResult,
+            checkoutData: checkoutData,
+            CSRFToken: TPS.CSRFToken
+        };
+
+        const newSectionModel = {
+            selectedDeliveryOptionId: method.deliveryOptionId,
+            selectedId: method.id,
+            selectedMethodPrice: method.price,
+            selectedMethodTitle: method.methodTitle,
+            selectedServiceType: method.type
+        };
+
+        if (method.type === 'home') {
+            this._postStandardDelivery(body, newSectionModel, callback);
+        } else if (method.serviceType.type === 'dmStandardDropPoint') {
+            this._postDropPoint(method, body, newSectionModel, callback)
+        }
+    }
+
+    _postStandardDelivery(body, newSectionModel, callback) {
+        $.post(TPS.actions.SELECT_GFS_DELIVERY_METHOD, $.extend(body, { deliveryAddressId: TPS.Stores.SelectedDeliveryAddress.attributes.id }))
+            .done(function (data) {
+                let deliveryMethodSectionModel = TPS.Stores.CheckoutDeliveryMethodSection,
+                    paymentModeCollection = TPS.Stores.PaymentModeList,
+                    collectionPointDetails = TPS.Stores.CollectionPointDetails,
+                    klarnaWidgetModel = TPS.Stores.KlarnaWidgetModel;
+
+                let klarnaPayment = data.paymentTypes.filter(function(payment) { return payment.code === 'klarna'; });
+
+                collectionPointDetails.set({ isSelected: false });
+                deliveryMethodSectionModel.set(newSectionModel, {silent: true});
+                CartDataModule.set(CartDataModule.parse(data.cartData));
+                paymentModeCollection && paymentModeCollection.reset(data.paymentTypes);
+                if (klarnaPayment.length) {
+                    klarnaWidgetModel.set({ supportedCountries: klarnaPayment[0].configurationOptions.supportedCountryCodes });
+                }
+                if (callback) {
+                    callback();
+                }
+            })
+    }
+
+    _postDropPoint(method, body, newSectionModel, callback) {
+        const dropPoint = this._selectedDropPoint;
+        const collectionPointAddress = {
+            countryIso: dropPoint.geoLocation.countryCode,
+            streetName: dropPoint.geoLocation.addressLines[0],
+            city: dropPoint.geoLocation.town,
+            postCode: dropPoint.geoLocation.postCode,
+            province: dropPoint.geoLocation.county,
+            collectionProviderName: dropPoint.providerName
+        };
+
+        const self = this;
+
+        $.post(TPS.actions.SELECT_GFS_DELIVERY_METHOD, $.extend(body, collectionPointAddress, { deliveryAddressId: TPS.Stores.SelectedCollectionPointAddress.attributes.id }))
+            .done(function (data) {
+                const collectionPointSection = TPS.Stores.CollectionPointSection,
+                    paymentModeCollection = TPS.Stores.PaymentModeList,
+                    collectionPointDetails = TPS.Stores.CollectionPointDetails,
+                    klarnaWidgetModel = TPS.Stores.KlarnaWidgetModel;
+
+                let klarnaPayment = data.paymentTypes.filter(function(payment) { return payment.code === 'klarna'; });
+
+                collectionPointDetails.set({
+                    isSelected: true,
+                    deliveryInfo: {
+                        localizedPrice: method.localizedPrice,
+                        methodTitle: method.methodTitle,
+                        deliveryTime: self._getDateFormat(method.deliveryTimeFrom, method.deliveryTimeTo)
+                    },
+                    collectionPointAddress: {
+                        providerName: dropPoint.providerName,
+                        addressLines: dropPoint.geoLocation.addressLines[0],
+                        town: dropPoint.geoLocation.town,
+                        postCode: dropPoint.geoLocation.postCode
+                    }
+                });
+                collectionPointSection.set(newSectionModel, {silent: true});
+                CartDataModule.set(CartDataModule.parse(data.cartData));
+                paymentModeCollection && paymentModeCollection.reset(data.paymentTypes);
+                if (klarnaPayment.length) {
+                    klarnaWidgetModel.set({ supportedCountries: klarnaPayment[0].configurationOptions.supportedCountryCodes });
+                }
+                if (callback) {
+                    callback();
+                }
+            });
     }
 
     _selectCheapestMethod(cheapestMethod) {
